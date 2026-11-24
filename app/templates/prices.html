@@ -2,8 +2,9 @@
 {% block title %}报价补录/更正{% endblock %}
 {% block content %}
 <h2>结算价补录 / 更正</h2>
-<p class="hint">按合约与交易日登记<strong>整数分</strong>结算价。同一合约同一交易日重复提交即更正；
-若该日是某次换月的价差参考日，系统会在同一事务内联动重算该次换月价差，<strong>不逐日回写连续价</strong>。</p>
+<p class="hint">按合约与交易日登记<strong>整数分</strong>结算价（实报）。同一合约同一交易日重复提交即更正；
+保存时在同一事务内重算<strong>当天</strong>的价差推算价与受影响换月价差（Fenwick 索引同步更新），
+不逐日回写连续价、不触碰其他交易日。实报永远优先于推算价。</p>
 <form method="post" class="grid-form">
   <label>合约
     <select name="contract_id" required>
@@ -18,7 +19,87 @@
 </form>
 {% if not contracts %}<p class="empty">请先在「换月计划」登记合约。</p>{% endif %}
 
-<h2>已登记报价 <small>（最多显示 500 笔，最新在前）</small></h2>
+<h2>交易所价差表（缺报补数）</h2>
+<p class="hint">按交易日保存、替换或清空价差表。每行填<strong>两个已登记的合约代码</strong>和
+<strong>后者减前者的整数分价差</strong>（即 合约B价 − 合约A价）。能经价差连起来的合约按组核对：
+组内至少有一笔实报、且全部实报与价差能同时成立，才推算缺报合约的结算价；
+无实报或有矛盾的组撤下推算价并提示原因，实报照用。保存与当天推算价、换月价差在同一事务原子生效。</p>
+<form method="get" class="inline">
+  <label>选择交易日
+    <select name="spread_date" onchange="this.form.submit()">
+      {% for d in spread_dates %}
+      <option value="{{ d }}" {{ 'selected' if d == spread_date }}>{{ d }}</option>
+      {% endfor %}
+      {% if not spread_dates %}<option value="">（尚无价差表）</option>{% endif %}
+    </select>
+  </label>
+</form>
+<form method="post" action="{{ url_for('spreads_view') }}" id="spread-form">
+  <label>交易日 <input type="date" name="date" value="{{ spread_date }}" required></label>
+  <table id="spread-table">
+    <thead><tr><th>合约 A</th><th>合约 B</th><th>价差（B − A，整数分）</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for s in spreads %}
+      <tr>
+        <td><input name="code_a" value="{{ s.code_a }}" required list="contract-codes"></td>
+        <td><input name="code_b" value="{{ s.code_b }}" required list="contract-codes"></td>
+        <td><input type="number" step="1" name="spread" value="{{ s.spread }}" required></td>
+        <td><button type="button" onclick="this.closest('tr').remove()">删除</button></td>
+      </tr>
+    {% else %}
+      <tr>
+        <td><input name="code_a" list="contract-codes" placeholder="如 IF2601"></td>
+        <td><input name="code_b" list="contract-codes" placeholder="如 IF2602"></td>
+        <td><input type="number" step="1" name="spread" placeholder="如 100"></td>
+        <td><button type="button" onclick="this.closest('tr').remove()">删除</button></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <datalist id="contract-codes">
+    {% for c in contracts %}<option value="{{ c.code }}"></option>{% endfor %}
+  </datalist>
+  <button type="button" onclick="addSpreadRow()">+ 增加一行价差</button>
+  <div class="actions">
+    <button type="submit" class="primary">保存 / 替换价差表</button>
+    <button type="submit" name="clear" value="1"
+            onclick="document.querySelectorAll('#spread-table tbody tr').forEach(tr=>tr.remove());">
+      清空该日价差表
+    </button>
+  </div>
+</form>
+<script>
+function addSpreadRow(){
+  const tbody = document.querySelector('#spread-table tbody');
+  const tr = document.createElement('tr');
+  tr.innerHTML = '<td><input name="code_a" list="contract-codes" required></td>'
+    + '<td><input name="code_b" list="contract-codes" required></td>'
+    + '<td><input type="number" step="1" name="spread" required></td>'
+    + '<td><button type="button" onclick="this.closest(\'tr\').remove()">删除</button></td>';
+  tbody.appendChild(tr);
+}
+</script>
+
+{% if spread_date %}
+<h2>{{ spread_date }} 推算结果 <small>（实报优先；无实报/矛盾组已撤下推算价并注明原因）</small></h2>
+<table>
+  <thead><tr><th>合约</th><th>推算价(分)</th><th>状态</th><th>原因</th></tr></thead>
+  <tbody>
+  {% for i in inferred %}
+    <tr class="{{ '' if i.status == 'ok' else 'warn' }}">
+      <td>{{ i.code }}</td>
+      <td>{{ i.price if i.price is not none else '—' }}</td>
+      <td>{{ {'ok': '推算成立', 'no_anchor': '无实报，已撤下', 'conflict': '矛盾，已撤下'}[i.status] }}</td>
+      <td>{{ i.reason }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="empty">该日暂无推算记录（无价差表或组内合约均已实报）</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>已登记实报 <small>（最多显示 500 笔，最新在前）</small></h2>
 <form method="get" class="inline">
   <label>按合约筛选
     <select name="contract_id" onchange="this.form.submit()">
@@ -30,12 +111,18 @@
   </label>
 </form>
 <table>
-  <thead><tr><th>交易日</th><th>合约</th><th>结算价(分)</th></tr></thead>
+  <thead><tr><th>交易日</th><th>合约</th><th>结算价(分)</th><th>来源</th><th>操作</th></tr></thead>
   <tbody>
   {% for p in prices %}
-    <tr><td>{{ p.date }}</td><td>{{ p.code }}</td><td>{{ p.price }}</td></tr>
+    <tr><td>{{ p.date }}</td><td>{{ p.code }}</td><td>{{ p.price }}</td><td>实报</td>
+      <td><form method="post" action="{{ url_for('price_delete_view') }}"
+            onsubmit="return confirm('确认撤下该笔实报？当天推算价与换月价差将同事务重算。');">
+        <input type="hidden" name="contract_id" value="{{ p.contract_id }}">
+        <input type="hidden" name="date" value="{{ p.date }}">
+        <button type="submit">撤下</button>
+      </form></td></tr>
   {% else %}
-    <tr><td colspan="3" class="empty">暂无报价</td></tr>
+    <tr><td colspan="5" class="empty">暂无报价</td></tr>
   {% endfor %}
   </tbody>
 </table>

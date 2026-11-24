@@ -5,8 +5,12 @@
     <small>{{ overview.cal_min or '—' }} ~ {{ overview.cal_max or '—' }}</small></div>
   <div class="card"><h3>合约数</h3><p>{{ overview.n_contracts }} 个</p></div>
   <div class="card"><h3>换月次数</h3><p>{{ overview.n_rolls }} 次</p>
-    <small>其中 {{ overview.n_missing_delta }} 次价差待报价</small></div>
-  <div class="card"><h3>已登记报价</h3><p>{{ overview.n_prices }} 笔</p></div>
+    <small>其中 {{ overview.n_missing_delta }} 次价差待报价，{{ overview.n_roll_inferred }} 次引用推算价</small></div>
+  <div class="card"><h3>已登记实报</h3><p>{{ overview.n_prices }} 笔</p></div>
+  <div class="card"><h3>价差表</h3><p>{{ overview.n_spread_days }} 个交易日</p>
+    <small>共 {{ overview.n_spread_rows }} 行</small></div>
+  <div class="card"><h3>可用推算价</h3><p>{{ overview.n_inferred_ok }} 条</p>
+    <small>实报优先，推算价仅补缺报</small></div>
 </section>
 
 <h2>合约序列</h2>
@@ -25,16 +29,17 @@
 <h2>固定换月计划</h2>
 <table>
   <thead><tr><th>第几次</th><th>切换日</th><th>价差参考日(前一交易日)</th>
-    <th>旧合约 → 新合约</th><th>价差(分)</th></tr></thead>
+    <th>旧合约 → 新合约</th><th>价差(分)</th><th>价差来源</th></tr></thead>
   <tbody>
   {% for r in rolls %}
     <tr class="{{ 'warn' if r.delta is none }}">
       <td>{{ r.ord }}</td><td>{{ r.switch_date }}</td><td>{{ r.pre_date }}</td>
       <td>{{ r.old_code }} → {{ r.new_code }}</td>
       <td>{% if r.delta is none %}<em>待补报价</em>{% else %}{{ r.delta }}{% endif %}</td>
+      <td>{% if r.delta is none %}—{% elif r.roll_inferred %}<em>含推算价</em>{% else %}实报{% endif %}</td>
     </tr>
   {% else %}
-    <tr><td colspan="5" class="empty">尚无换月记录</td></tr>
+    <tr><td colspan="6" class="empty">尚无换月记录</td></tr>
   {% endfor %}
   </tbody>
 </table>

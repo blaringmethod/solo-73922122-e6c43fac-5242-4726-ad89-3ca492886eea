@@ -110,24 +110,100 @@ def create_app() -> Flask:
                                f"{preview['old_price']} → {preview['price']} 分")
                     else:
                         msg = f"已补录 {preview['contract']} {day} 报价 {preview['price']} 分"
+                    inf = preview.get("inferred")
+                    if inf is not None:
+                        msg += (f"；当天推算价重算：成立 {inf['ok']} 条，"
+                                f"无实报撤下 {inf['no_anchor']} 组，矛盾撤下 {inf['conflict']} 组")
                     if preview.get("affected_roll_ord") is not None:
                         d = preview.get("new_delta")
                         d_txt = "仍缺报价" if d is None else f"新价差 = {d} 分"
-                        msg += f"；联动重算第 {preview['affected_roll_ord']} 次换月（{d_txt}）"
+                        msg += f"；联动重算第 {preview['affected_roll_ord']} 次换月（{d_txt}"
+                        msg += "，含推算价）" if preview.get("roll_inferred") else "）"
+                    if inf is not None and inf["reasons"]:
+                        for reason in inf["reasons"][:5]:
+                            flash(reason, "warn")
                     flash(msg, "ok")
             except db.AppError as e:
                 flash(str(e), "err")
             except (ValueError, KeyError):
                 flash("合约、日期或价格输入不合法（价格须为整数分）", "err")
-            return redirect(url_for("prices_view"))
+            return redirect(url_for("prices_view", spread_date=request.form.get("date", "").strip()))
 
         sel = request.args.get("contract_id", type=int)
+        spread_date = request.args.get("spread_date", "").strip()
+        if not spread_date:
+            spread_dates = db.list_spread_dates(conn)
+            spread_date = spread_dates[-1] if spread_dates else ""
         return render_template(
             "prices.html",
             contracts=db.list_contracts(conn),
             prices=db.list_prices(conn, sel),
             selected=sel,
+            spread_date=spread_date,
+            spread_dates=db.list_spread_dates(conn),
+            spreads=db.list_spreads(conn, spread_date) if spread_date else [],
+            inferred=db.list_inferred(conn, spread_date if spread_date else None),
         )
+
+    # ------------------------------------------------------------------ #
+    # 价差表：按交易日保存 / 替换 / 清空（交易所公布的合约价差补数）
+    # ------------------------------------------------------------------ #
+    @app.route("/prices/delete", methods=["POST"])
+    def price_delete_view():
+        """撤下一笔实报：同事务重算当天推算价与受影响换月（Fenwick 同步）。"""
+        conn = get_conn()
+        day = request.form.get("date", "").strip()
+        try:
+            contract_id = int(request.form["contract_id"])
+            preview = db.delete_price(conn, contract_id, day)
+            if not preview["committed"]:
+                flash(f"删除失败已回滚（{preview.get('error', '未知错误')}），原有供数不变", "err")
+            else:
+                flash(f"已撤下 {preview['contract']} {day} 的实报；当天推算价与受影响换月已重算", "ok")
+                for reason in preview.get("inferred", {}).get("reasons", [])[:5]:
+                    flash(reason, "warn")
+        except db.AppError as e:
+            flash(str(e), "err")
+        except (ValueError, KeyError):
+            flash("合约或日期输入不合法", "err")
+        return redirect(url_for("prices_view", spread_date=day))
+
+    @app.route("/spreads", methods=["POST"])
+    def spreads_view():
+        conn = get_conn()
+        day = request.form.get("date", "").strip()
+        codes_a = request.form.getlist("code_a")
+        codes_b = request.form.getlist("code_b")
+        spreads = request.form.getlist("spread")
+        rows: list[tuple[str, str, int]] = []
+        try:
+            for ca, cb, sp in zip(codes_a, codes_b, spreads):
+                ca, cb, sp = ca.strip(), cb.strip(), sp.strip()
+                if not ca and not cb and not sp:
+                    continue
+                rows.append((ca, cb, int(sp)))
+            preview = db.save_spreads(conn, day, rows)
+            if not preview["committed"]:
+                flash(f"价差表保存失败已回滚（{preview.get('error', '未知错误')}），"
+                      f"原有供数不变", "err")
+            else:
+                if not rows:
+                    flash(f"已清空 {day} 价差表；当天推算价与受影响换月已在同一事务重算", "ok")
+                else:
+                    inf = preview["inferred"]
+                    flash(f"已保存 {day} 价差表 {preview['rows']} 行；推算价重算："
+                          f"成立 {inf['ok']} 条，无实报撤下 {inf['no_anchor']} 组，"
+                          f"矛盾撤下 {inf['conflict']} 组", "ok")
+                if "new_delta" in preview:
+                    d = preview["new_delta"]
+                    flash(f"联动重算换月价差：{'仍缺报价' if d is None else f'{d} 分'}", "ok")
+                for reason in preview["inferred"]["reasons"][:5]:
+                    flash(reason, "warn")
+        except db.AppError as e:
+            flash(str(e), "err")
+        except ValueError:
+            flash("价差输入不合法：每行须填两个已登记合约代码和整数分价差（后者减前者）", "err")
+        return redirect(url_for("prices_view", spread_date=day))
 
     # ------------------------------------------------------------------ #
     # 取数：连续价查询 + CSV 下载
